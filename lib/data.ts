@@ -3,36 +3,59 @@ import translations from "@/data/translations.json";
 import { sql } from "./db";
 import { fetchSachetAlerts } from "./sachet";
 import { fetchImdAlerts } from "./cap";
-import { haversineKm } from "./geo";
-import { SEVERITY_RANK } from "./severity";
-import type { LiveAlert, Profile } from "./types";
+import { haversineKm, kmOutsidePolygons } from "./geo";
+import { priorityScore } from "./severity";
+import { placeMatchesArea } from "./places";
+import type { FeedHealth, LiveAlert, Profile } from "./types";
+
+export type FeedStatus = { sachet: FeedHealth; imd: FeedHealth };
 
 // Live alerts from both real sources, merged. No invented/sample alerts —
 // if both feeds are down, there simply are no live alerts.
-export async function fetchLiveAlerts(): Promise<{ sachetOk: boolean; imdOk: boolean; alerts: LiveAlert[] }> {
+export async function fetchLiveAlerts(): Promise<{ feeds: FeedStatus; alerts: LiveAlert[] }> {
   const [sachet, imd] = await Promise.all([fetchSachetAlerts(), fetchImdAlerts()]);
-  return { sachetOk: sachet.ok, imdOk: imd.ok, alerts: [...sachet.alerts, ...imd.alerts] };
+  const { alerts: sachetAlerts, ...sachetHealth } = sachet;
+  const { alerts: imdAlerts, ...imdHealth } = imd;
+  return { feeds: { sachet: sachetHealth, imd: imdHealth }, alerts: [...sachetAlerts, ...imdAlerts] };
 }
 
-// An alert "applies" to a point if the point falls inside the alert's warned
-// area (SACHET gives a real radius from its area_covered figure, plus a 20km
-// buffer for imprecision), or — for alerts with no coordinates (the IMD
-// bulletin feed) — if the district/state name appears in the alert's area text.
+// Published rings are coarse, so allow a small tolerance outside them rather
+// than treating the boundary as exact.
+const POLYGON_TOLERANCE_KM = 5;
+
+// An alert "applies" to a point, in descending order of how much the source
+// actually knows about its own warned area:
+//   1. a published polygon — authoritative, and the only signal trusted when
+//      present, because an areaDesc has been observed naming the wrong state
+//      for a polygon that covered somewhere else entirely;
+//   2. a centroid plus radius derived from the reported area;
+//   3. the area text, matched on whole words with transliteration aliases.
 export function alertsNear(alerts: LiveAlert[], lat: number, lng: number, district: string, state: string): LiveAlert[] {
+  const here = { lat, lng };
   return alerts.filter((a) => {
+    if (a.polygons.length) return kmOutsidePolygons(here, a.polygons) <= POLYGON_TOLERANCE_KM;
     if (a.lat != null && a.lng != null) {
-      const radius = (a.radius_km ?? 25) + 20;
-      return haversineKm({ lat, lng }, { lat: a.lat, lng: a.lng }) <= radius;
+      const radius = a.radius_km ?? 25;
+      // Scale the imprecision buffer to the alert instead of always adding
+      // 20km, which quintuples the reach of a small, tightly-drawn warning.
+      const buffer = Math.min(20, Math.max(2, radius * 0.15));
+      return haversineKm(here, { lat: a.lat, lng: a.lng }) <= radius + buffer;
     }
-    const hay = a.area_text.toLowerCase();
-    return (!!district && hay.includes(district.toLowerCase())) || (!!state && hay.includes(state.toLowerCase()));
+    return placeMatchesArea(a.area_text, district, state);
   });
+}
+
+// Defence in depth: the feed parsers already drop expired alerts, but the
+// result is cached, so re-check against the clock at request time.
+export function stillValid(a: LiveAlert, now = Date.now()): boolean {
+  return !a.expires || new Date(a.expires).getTime() >= now;
 }
 
 // Highest-severity alert in scope, plus every agency reporting the same
 // hazard type — if they disagree on severity, the higher one is shown and
 // every agency is still listed.
 export function currentAlert(alerts: LiveAlert[]) {
+  alerts = alerts.filter((a) => stillValid(a));
   if (!alerts.length) return null;
 
   // A feed can carry both an older and a newer alert from the same agency
@@ -49,14 +72,23 @@ export function currentAlert(alerts: LiveAlert[]) {
   }
   const deduped = [...latestByAgencyHazard.values()];
 
+  // Severity dominates, then urgency, then certainty, then recency — so a
+  // hazard that's already being observed outranks an equally severe one that
+  // is merely possible, without a milder hazard ever displacing a worse one.
   const top = deduped.sort(
-    (a, b) => SEVERITY_RANK[b.severity] - SEVERITY_RANK[a.severity] || b.timestamp.localeCompare(a.timestamp)
+    (a, b) => priorityScore(b) - priorityScore(a) || b.timestamp.localeCompare(a.timestamp)
   )[0];
   const sources = deduped
     .filter((a) => a.hazard_type === top.hazard_type)
     .map((a) => ({ agency: a.source_agency, severity: a.severity, headline: a.headline }));
   const conflict = new Set(sources.map((s) => s.severity)).size > 1;
-  return { alert: top, sources, conflict };
+  // Alerts for the same location but a different hazard type than the one
+  // shown — kept separate from `conflict` (which is specifically about
+  // severity disagreement within the same hazard) so neither loses information.
+  const otherHazardSources = deduped
+    .filter((a) => a.hazard_type !== top.hazard_type)
+    .map((a) => ({ agency: a.source_agency, hazard_type: a.hazard_type, severity: a.severity, headline: a.headline }));
+  return { alert: top, sources, conflict, otherHazardSources };
 }
 
 type DwellingRule = { dwelling_type: string; hazard_type: string; language: string; action_text: string };

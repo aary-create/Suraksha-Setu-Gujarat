@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
+import { Info, Phone } from "@/components/Icon";
 import { useT } from "@/lib/i18n";
 import { darkenTiles, loadLeaflet } from "@/lib/leaflet";
 import seed from "@/data/seed.json";
@@ -62,40 +63,58 @@ export default function Help() {
   return (
     <main>
       <h1>{t("helpTitle")}</h1>
-      <p className="muted">{t("hospitalsNote")}</p>
-      {error && <p className="banner">{t(error)}</p>}
+
+      {/* Calling comes first. It is the fastest thing a person in trouble can
+          do, and it works with no map, no data and no location permission. */}
+      <a href="tel:112" className="btn block" style={{ marginTop: 16 }}>
+        <Phone />
+        {t("call", { n: 112 })}
+      </a>
+      <div className="helpline-row">
+        {helplines.map((hl, i) => (
+          <a key={i} className="helpline" href={`tel:${hl.contact}`}>
+            <b>{hl.contact}</b>
+            <span>{hl.name}</span>
+          </a>
+        ))}
+      </div>
+
+      <h2>{t("findNearestHospital")}</h2>
+      <p className="muted small" style={{ marginTop: -4 }}>{t("hospitalsNote")}</p>
+      {error && <p className="banner" style={{ marginTop: 12 }}><Info />{t(error)}</p>}
 
       {me && <div ref={mapEl} className="map" />}
 
-      <h2>{t("findNearestHospital")}</h2>
       {hospitals === null ? (
-        <p className="muted">{t("loading")}</p>
+        <>
+          <div className="skeleton line" style={{ width: "70%" }} />
+          <div className="skeleton line" style={{ width: "55%" }} />
+          <div className="skeleton line" style={{ width: "62%" }} />
+        </>
       ) : hospitals.length === 0 ? (
         <p className="muted">{t("noHospitals")}</p>
       ) : (
-        <ul className="list">
+        <div>
           {hospitals.map((h) => (
-            <li key={h.place_id}>
-              <div className="title">{h.name}</div>
-              <div className="muted">{t("distanceAway", { km: h.distance_km.toFixed(1) })}</div>
-              <div className="row" style={{ marginTop: 8 }}>
-                {h.phone && <a className="btn ghost" href={`tel:${h.phone}`}>{t("call", { n: h.phone })}</a>}
-                <a className="btn ghost" href={`https://www.openstreetmap.org/directions?to=${h.lat},${h.lng}`} target="_blank" rel="noreferrer">{t("directions")}</a>
-              </div>
-            </li>
+            <div className="place-row" key={h.place_id}>
+              <a
+                className="place-main"
+                href={`https://www.openstreetmap.org/directions?to=${h.lat},${h.lng}`}
+                target="_blank"
+                rel="noreferrer"
+              >
+                <span className="place-name">{h.name}</span>
+                <span className="place-dist">{t("distanceAway", { km: h.distance_km.toFixed(1) })}</span>
+              </a>
+              {h.phone && (
+                <a className="icon-btn" href={`tel:${h.phone}`} aria-label={t("call", { n: h.phone })}>
+                  <Phone size={18} />
+                </a>
+              )}
+            </div>
           ))}
-        </ul>
+        </div>
       )}
-
-      <h2>{t("helplines")}</h2>
-      <ul className="list">
-        {helplines.map((hl, i) => (
-          <li key={i} className="row" style={{ justifyContent: "space-between" }}>
-            <span>{hl.name}</span>
-            <a className="btn" href={`tel:${hl.contact}`}>{hl.contact}</a>
-          </li>
-        ))}
-      </ul>
     </main>
   );
 }

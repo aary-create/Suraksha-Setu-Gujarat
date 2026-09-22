@@ -62,6 +62,10 @@ const unsigned long RETAIN_SECONDS    = 5UL * 24UL * 60UL * 60UL;  // 5-day on-d
 #define PAYLOAD_LEN 128
 #define SEEN_IDS_MAX 20
 #define HISTORY_MAX 40
+// Sized for a full HISTORY_MAX-entry log: each entry is at most PAYLOAD_LEN
+// bytes of payload plus ~80 bytes of JSON/ArduinoJson overhead (keys,
+// quoting, per-object bookkeeping).
+#define HISTORY_DOC_SIZE (HISTORY_MAX * (PAYLOAD_LEN + 80))
 
 struct AlertPacket {
   char payload[PAYLOAD_LEN];
@@ -109,41 +113,46 @@ void loadAlertFromFlash(AlertPacket& a) {
   f.close();
 }
 
+// Copies entries from `src` into `dst`, dropping anything older than
+// RETAIN_SECONDS relative to `nowTs` — shared by the write path
+// (appendHistory) and the read path (handleApiHistory), mirroring how the
+// phone app's readHistory() in lib/history.ts re-prunes on every read.
+void copyUnexpired(JsonArray src, JsonArray dst, unsigned long nowTs) {
+  unsigned long cutoff = (nowTs > RETAIN_SECONDS) ? (nowTs - RETAIN_SECONDS) : 0;
+  for (JsonObject e : src) {
+    unsigned long ts = e["timestamp"] | 0UL;
+    if (ts == 0 || ts >= cutoff) dst.add(e);
+  }
+}
+
 // Appends to the 5-day on-device history, same policy as the phone app:
 // only record an actual change, prune anything older than RETAIN_SECONDS,
-// and hard-cap the entry count so flash usage stays small.
+// and hard-cap the entry count so flash usage stays small. The prune step
+// always runs (even on a duplicate-payload no-op write), otherwise stale
+// entries never age out while the alert stays unchanged.
 void appendHistory(const AlertPacket& a) {
-  // Load whatever history already exists.
-  DynamicJsonDocument loaded(4096);
+  DynamicJsonDocument loaded(HISTORY_DOC_SIZE);
   File rf = LittleFS.open(HISTORY_FILE, "r");
   if (rf) { deserializeJson(loaded, rf); rf.close(); }
   JsonArray oldArr = loaded.as<JsonArray>();
 
-  // Skip if this is the same alert as the most recent entry — nothing to log.
+  bool isDuplicate = false;
   if (!oldArr.isNull() && oldArr.size() > 0) {
     JsonObject last = oldArr[oldArr.size() - 1];
     const char* lastPayload = last["payload"] | "";
-    if (strcmp(lastPayload, a.payload) == 0) return;
+    isDuplicate = (strcmp(lastPayload, a.payload) == 0);
   }
 
-  // Anything older than 5 days is dropped. Only meaningful once we have
-  // real time from the server (timestamp > 0) — before the first sync,
-  // nothing is old enough to prune yet.
-  unsigned long cutoff = (a.timestamp > RETAIN_SECONDS) ? (a.timestamp - RETAIN_SECONDS) : 0;
-
-  DynamicJsonDocument out(4096);
+  DynamicJsonDocument out(HISTORY_DOC_SIZE);
   JsonArray outArr = out.to<JsonArray>();
-  if (!oldArr.isNull()) {
-    for (JsonObject e : oldArr) {
-      unsigned long ts = e["timestamp"] | 0UL;
-      if (ts == 0 || ts >= cutoff) outArr.add(e);
-    }
-  }
-  JsonObject entry = outArr.createNestedObject();
-  entry["payload"] = a.payload;
-  entry["timestamp"] = a.timestamp;
+  if (!oldArr.isNull()) copyUnexpired(oldArr, outArr, a.timestamp);
 
-  while (outArr.size() > HISTORY_MAX) outArr.remove(0); // hard cap regardless of age
+  if (!isDuplicate) {
+    JsonObject entry = outArr.createNestedObject();
+    entry["payload"] = a.payload;
+    entry["timestamp"] = a.timestamp;
+    while (outArr.size() > HISTORY_MAX) outArr.remove(0); // hard cap regardless of age
+  }
 
   File wf = LittleFS.open(HISTORY_FILE, "w");
   if (wf) { serializeJson(outArr, wf); wf.close(); }
@@ -169,7 +178,10 @@ void broadcastAlert(const AlertPacket& a, uint8_t hop) {
   esp_now_send(broadcastAddr, (uint8_t*)&out, sizeof(out));
 }
 
-void onDataRecv(const uint8_t* mac, const uint8_t* incomingData, int len) {
+// arduino-esp32 core (ESP-IDF >=5.x, what a fresh board-manager install gets
+// today) requires this signature; the old (const uint8_t* mac, ...) form
+// fails to compile against esp_now_register_recv_cb's expected type.
+void onDataRecv(const esp_now_recv_info_t* info, const uint8_t* incomingData, int len) {
   if (len != sizeof(AlertPacket)) return;
   AlertPacket incoming;
   memcpy(&incoming, incomingData, sizeof(incoming));
@@ -257,10 +269,26 @@ void handleApiAlert() {
 }
 
 void handleApiHistory() {
-  File f = LittleFS.open(HISTORY_FILE, "r");
-  if (!f) { server.send(200, "application/json", "[]"); return; }
-  server.streamFile(f, "application/json");
-  f.close();
+  DynamicJsonDocument loaded(HISTORY_DOC_SIZE);
+  File rf = LittleFS.open(HISTORY_FILE, "r");
+  if (rf) { deserializeJson(loaded, rf); rf.close(); }
+  JsonArray oldArr = loaded.as<JsonArray>();
+  if (oldArr.isNull()) { server.send(200, "application/json", "[]"); return; }
+
+  // Prune on read too — if the alert hasn't changed in 5+ days, appendHistory
+  // hasn't run to age old entries out, so this is the only place that happens.
+  DynamicJsonDocument out(HISTORY_DOC_SIZE);
+  JsonArray outArr = out.to<JsonArray>();
+  copyUnexpired(oldArr, outArr, currentAlert.timestamp);
+
+  if (outArr.size() != oldArr.size()) {
+    File wf = LittleFS.open(HISTORY_FILE, "w");
+    if (wf) { serializeJson(outArr, wf); wf.close(); }
+  }
+
+  String body;
+  serializeJson(outArr, body);
+  server.send(200, "application/json", body);
 }
 
 // ---------------------------------------------------------------------

@@ -7,8 +7,8 @@ Local Government Directory (Ministry of Panchayati Raj), not typed by
 hand. Real alerts, real hospitals, real precautions — nothing in this app
 is sample or invented data.
 
-Pages: `/onboarding`, `/dashboard`, `/help`, `/offline`
-APIs: `/api/users`, `/api/dashboard`, `/api/gujarat`, `/api/esp32-sync`, `/api/geocode/search`, `/api/geocode/reverse`, `/api/hospitals`, `/api/explain`
+Pages: `/` (alert), `/setup`, `/help`, `/history`
+APIs: `/api/dashboard`, `/api/users`, `/api/gujarat`, `/api/esp32-sync`, `/api/geocode/search`, `/api/geocode/reverse`, `/api/hospitals`, `/api/explain`, `/api/push/subscribe`, `/api/cron/check-alerts`
 
 ## What this version adds
 
@@ -22,6 +22,35 @@ APIs: `/api/users`, `/api/dashboard`, `/api/gujarat`, `/api/esp32-sync`, `/api/g
 - **Auto-read-aloud for new severe alerts.** When a new Extreme or Severe alert arrives, it's read aloud automatically (mute toggle provided) — on top of the existing on-demand "Read aloud" button.
 - **Feed and community reports removed** — this version is scoped to personal alerts and precautions only, no nationwide feed or user-submitted reports.
 - Fixed a handful of real inconsistencies found in a full line-by-line review: a stale theme color left over from before the redesign, stale "Google Maps" copy in all 5 languages left over from the OpenStreetMap migration, the bottom nav's CSS still assuming 4 tabs after Feed was removed, and repeated work being redone on every request instead of once at startup.
+
+## How an alert is judged safe to show
+
+Alerting is only useful if a quiet screen genuinely means "nothing is
+wrong". These are the rules the pipeline enforces before anything reaches
+a person:
+
+- **Both feeds are fetched over HTTPS.** A warning delivered over plain
+  HTTP can be altered or suppressed by anything on the network path.
+- **Expired alerts are dropped**, on parse and again at request time.
+  SACHET windows can be as short as an hour, and CAP `expires` is
+  authoritative. Observed in the live feed: IMD bulletins still listed
+  days after they expired.
+- **Only `status: Actual` is shown.** Drills, exercises and system tests
+  are discarded rather than rendered as emergencies, and a `msgType:
+  Cancel` removes an alert instead of sitting beside it.
+- **Undisseminated SACHET records are skipped** — roughly a third of the
+  feed at any time is not yet officially released.
+- **A published polygon always wins.** Centroid-plus-radius is a circle
+  drawn over an irregular warned area, and the area *text* has been seen
+  naming the wrong state entirely for a polygon covering somewhere else.
+  Text matching is the last resort, and it matches whole words against a
+  transliteration alias table so "Kutch" and "Kachchh" are the same place.
+- **Failures never quietly downgrade severity.** An unrecognised value
+  marks the alert `degraded` and the UI says so, instead of defaulting to
+  "Moderate" and looking confident.
+- **"We could not check" is never rendered as "you are safe."** The API
+  returns `canVouch`, and the screen says plainly when it can't stand
+  behind what it's showing.
 
 ## Run on your laptop
 
@@ -38,7 +67,7 @@ npm run dev                    # open http://localhost:3000
 1. Push this folder to a GitHub repo, then on vercel.com: Add New → Project → import the repo → Deploy. Alerts, location, search, hospitals and the Gujarat browser all work immediately with no key to create.
 2. **Database (optional):** Vercel → Storage → Create Database → Neon → Connect to project. Tables are created automatically on first request. Without it, users still onboard fine, the data just doesn't persist between server restarts.
 3. **AI explanation (optional, free):** Vercel → Settings → Environment Variables → add `GROQ_API_KEY` from console.groq.com — free, no credit card. Without it, "Explain this alert simply" still works via the built-in glossary, it just won't have the AI-rewritten version.
-4. Test the live feeds: open `https://YOUR-APP.vercel.app/api/dashboard?lat=23.03&lng=72.58&district=Ahmedabad&state=Gujarat` — `sachetOk` and `imdOk` should both be `true`.
+4. Test the live feeds: open `https://YOUR-APP.vercel.app/api/dashboard?lat=23.03&lng=72.58&district=Ahmedabad&state=Gujarat` — `canVouch` should be `true`, and `feeds.sachet.ok` / `feeds.imd.ok` should both be `true`.
 
 ## ESP32
 

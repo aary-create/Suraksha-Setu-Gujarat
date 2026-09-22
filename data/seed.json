@@ -149,6 +149,18 @@
         "If you smell gas or hear hissing, leave immediately and shut off the supply if you can do so safely, don't use switches or flames.",
         "Avoid damaged buildings until they've been checked — don't re-enter to retrieve belongings."
       ]
+    },
+    "other": {
+      "before": [
+        "Read the alert headline above carefully — it is the most specific instruction available for this situation.",
+        "Keep your phone charged and follow official updates, since this hazard type doesn't have its own detailed guide yet.",
+        "Avoid unnecessary travel while the alert is active and keep emergency numbers within reach."
+      ],
+      "after": [
+        "Keep watching for official updates until the alert is lifted.",
+        "Check yourself, your family and your property for anything unusual before resuming normal activity.",
+        "Contact local authorities or 112 if you're unsure it's safe to resume normal activity."
+      ]
     }
   }
 }
